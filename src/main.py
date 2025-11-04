@@ -31,27 +31,25 @@ def validate_config(config):
     assert isinstance(config['task_setting']['test_size'], int), "test_size must be an integer"
     assert isinstance(config['task_setting']['seed'], int), "seed must be an integer"
     assert isinstance(config['task_setting']['post_instruction'], bool), "post_instruction must be a boolean"
-
     # Base model setting
-    assert config['base_model_setting']['model_type'] in ['openai'], \
-        "base_model.model_type must be 'openai'"
+    assert config['base_model_setting']['model_type'] in ['openai', 'ollama'], \
+        "base_model.model_type must be 'openai' or 'ollama'"
     assert config['base_model_setting']['model_name'] is not None, "base_model.model_name must be specified"
     assert isinstance(config['base_model_setting']['temperature'], float), "base_model.temperature must be a float"
     
-    if config['base_model_setting']['model_type'] in ['openai'] and config['base_model_setting']['api_key'] is None:
+    if config['base_model_setting']['model_type'] == 'openai' and config['base_model_setting']['api_key'] is None:
         raise ValueError("Please set base model's api key")
     assert isinstance(config['base_model_setting']['base_model'], bool), "base_model must be a boolean"
 
     # Optim model setting
-    assert config['optim_model_setting']['model_type'] in ['openai'], \
-        "optim_model.model_type must be openai "
+    assert config['optim_model_setting']['model_type'] in ['openai', 'ollama'], \
+        "optim_model.model_type must be 'openai' or 'ollama'"
     assert config['optim_model_setting']['model_name'] is not None, "optim_model.model_name must be specified"
     assert isinstance(config['optim_model_setting']['temperature'], float), "optim_model.temperature must be a float"
    
-    if config['optim_model_setting']['model_type'] in ['openai'] and config['optim_model_setting']['api_key'] is None:
+    if config['optim_model_setting']['model_type'] == 'openai' and config['optim_model_setting']['api_key'] is None:
         raise ValueError("Please set optim model's api key")
     assert isinstance(config['optim_model_setting']['base_model'], bool), "base_model must be a boolean"
-
     # World model setting
     assert isinstance(config['world_model_setting']['iteration_num'], int), "search.iteration_num must be an integer"
     assert isinstance(config['world_model_setting']['stop_early_thresh'], int), "world_model.stop_early_thresh must be an integer"

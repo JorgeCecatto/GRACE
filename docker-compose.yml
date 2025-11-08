@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - ollama_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+  grace:
+      build:
+        context: ./GRACE/
+        dockerfile: ./Dockerfile
+      container_name: grace
+      volumes:
+        - ./GRACE:/workspaces/src
+      networks:
+        - ollama_network
+      working_dir: /workspaces/src
+      command: sleep infinity
+      restart: unless-stopped
+      environment:
+        - OLLAMA_BASE_URL=http://ollama:11434
+volumes:
+  ollama_data:
+    driver: local
+networks:
+  ollama_network:
+    driver: bridge
+    name: ollama_network

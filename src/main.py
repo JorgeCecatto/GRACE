@@ -60,7 +60,28 @@ def validate_config(config):
 
     assert isinstance(config['world_model_setting']['train_shuffle'], bool), "world_model.train_shuffle must be a boolean"
 
-
+    if 'use_meta_prompting' in config['world_model_setting']:
+        assert isinstance(config['world_model_setting']['use_meta_prompting'], bool), \
+            "use_meta_prompting must be a boolean"
+        
+        if config['world_model_setting']['use_meta_prompting']:
+            # Strategy
+            valid_strategies = ['expert_generalist', 'task_decomposition', 'zero_shot_cot']
+            assert config['world_model_setting'].get('meta_prompt_strategy', 'expert_generalist') in valid_strategies, \
+                f"meta_prompt_strategy must be one of {valid_strategies}"
+            
+            # Num candidates
+            assert isinstance(config['world_model_setting'].get('meta_prompt_num_candidates', 3), int), \
+                "meta_prompt_num_candidates must be an integer"
+            assert 1 <= config['world_model_setting'].get('meta_prompt_num_candidates', 3) <= 5, \
+                "meta_prompt_num_candidates must be between 1 and 5"
+            
+            # Eval samples
+            assert isinstance(config['world_model_setting'].get('meta_prompt_eval_samples', 10), int), \
+                "meta_prompt_eval_samples must be an integer"
+            assert config['world_model_setting'].get('meta_prompt_eval_samples', 10) >= 5, \
+                "meta_prompt_eval_samples must be at least 5"
+    
 
 
 def main(args):

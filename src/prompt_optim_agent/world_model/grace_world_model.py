@@ -1,12 +1,19 @@
 from .gradient_descent import *
 from ..test_helper import eval_instruction_with_loader
-from typing import Generic
+from typing import Generic, Optional, List, Dict
 from ..search_algo.base_algo import State, Action
 from ..search_algo.grace_search import GraceNode
-
 from collections import deque
 import random
 import numpy as np
+
+# Imports para meta-prompting
+try:
+    from .meta_prompter import MetaPrompter
+    META_PROMPTER_AVAILABLE = True
+except ImportError:
+    META_PROMPTER_AVAILABLE = False
+
 
 class GraceSearchWorldModel():
     def __init__(
@@ -26,18 +33,34 @@ class GraceSearchWorldModel():
         train_batch_size: int = 8,
         test_batch_size: int = 200,
         eval_batch_size: int = 200,
+        
+        # Meta-Prompting (melhora prompt inicial)
+        use_meta_prompting: bool = False,
+        num_meta_prompts: int = 3,
+        meta_prompt_strategy: str = 'expert_generalist',
+        
+        # Logging
+        print_log: bool = True,
+        
         **kwargs
         ) -> None:
         
         self.task = task
         self.logger = logger
+        self.print_log = print_log if logger is not None else False
         self.base_model = base_model
         self.optim_model = optim_model
-
+        self.strategy = meta_prompt_strategy
         self.iteration_num = iteration_num
         self.stop_early_thresh = stop_early_thresh
         self.num_correct_sample = num_correct_sample
         self.num_wrong_sample = num_wrong_sample
+        
+        # Meta-prompting settings
+        self.use_meta_prompting = use_meta_prompting
+        self.num_meta_prompts = num_meta_prompts
+        self.meta_prompt_strategy = meta_prompt_strategy
+        self.train_examples = None  # Cache dos exemplos de treino para meta-prompting
 
         self.train_dataloader = self.task.get_dataloader('train', 
                                                         batch_size=train_batch_size, 
@@ -57,6 +80,41 @@ class GraceSearchWorldModel():
                                                 optim_model=optim_model, 
                                                 num_new_prompts = num_new_prompts,
                                                 eval_dataloader = self.eval_dataloader)
+        
+        # Inicializa meta-prompter
+        self.meta_prompter = None
+        if self.use_meta_prompting:
+            if not META_PROMPTER_AVAILABLE:
+                if self.print_log:
+                    self.logger.warning("Meta-prompting requested but MetaPrompter not available")
+                self.use_meta_prompting = False
+            else:
+                task_description = getattr(self.task, 'task_description', self.task.task_name)
+                
+                # Inicializa MetaPrompter passando o modelo diretamente
+                self.meta_prompter = MetaPrompter(
+                    optim_model=self.gradient_descent.optim_model,
+                    task_description=task_description,
+                    strategy=self.strategy,
+                    logger=self.logger
+                )
+                
+                if self.print_log:
+                    self.logger.info("✅ Meta-Prompter initialized")
+    
+    def _collect_train_examples(self) -> List[Dict]:
+        """Coleta todos os exemplos de treino para meta-prompting."""
+        if self.train_examples is not None:
+            return self.train_examples
+        
+        examples = []
+        for batch in self.train_dataloader:
+            for q, a in zip(batch['question'], batch['answer']):
+                examples.append({'question': q, 'answer': a})
+        
+        self.train_examples = examples
+        return examples
+    
     def _infinite_data_loader(self, data_loader):
         while True:
             for batch in data_loader:
@@ -69,7 +127,8 @@ class GraceSearchWorldModel():
 
     
 
-    def sample_forward_output(self,forward_output, num_wrong=3, num_right=3):
+    def sample_forward_output(self, forward_output, num_wrong=3, num_right=3):
+        """Amostra exemplos de treino."""
         examples = forward_output['examples']
 
         if "ncbi" not in self.task.task_name.lower():
@@ -77,13 +136,15 @@ class GraceSearchWorldModel():
         else:
             valid_examples = examples
     
+        # Separa corretos e errados
         wrong_samples = [ex for ex in valid_examples if ex['label'] != ex['pred']]
         right_samples = [ex for ex in valid_examples if ex['label'] == ex['pred']]
 
+        # Amostra aleatoriamente
         selected_wrong = random.sample(wrong_samples, min(num_wrong, len(wrong_samples)))
         selected_right = random.sample(right_samples, min(num_right, len(right_samples)))
         
-        selected = selected_right+selected_wrong
+        selected = selected_right + selected_wrong
 
         new_forward_output = {
             'cur_prompt': forward_output['cur_prompt'],
@@ -165,14 +226,19 @@ class GraceSearchWorldModel():
 
         for iter in range(self.iteration_num):
             cur_child_node = child_node
-            self.logger.info(f'------------------  expand node {cur_child_node.id} ---------------------')
+            self.logger.info(f'------------------  expand node {cur_child_node.id}  ---------------------')
 
             train_forward_output = self.train_forward(cur_prompt=child_node.prompt)
             cur_acc = self._sort_helper(train_forward_output['acc'])
             if int(cur_acc)==1:
                 break
            
-            sampled_forward_output = self.sample_forward_output(train_forward_output,self.num_wrong_sample,self.num_correct_sample)
+          
+            sampled_forward_output = self.sample_forward_output(
+                train_forward_output,
+                self.num_wrong_sample,
+                self.num_correct_sample
+            )
 
 
             self.logger.info(f'----------------  OPTIMIZATION batch {iter} ----------------')
@@ -222,13 +288,63 @@ class GraceSearchWorldModel():
 
 
     
-    def step(self, node:GraceNode):
+    def step(self, node: GraceNode):
+        """Passo de expansão."""
         new_nodes, gradient_descent_output = self._gradient_descent_step(node=node)
         return new_nodes, gradient_descent_output
     
     def build_root(self, init_prompt):
-        node = GraceNode(prompt=init_prompt, action=None, parent=None,mom_prompt=None)
-
+        """
+        Constrói nó raiz.
+        
+        Se meta-prompting está ativo: gera e avalia múltiplos prompts melhorados.
+        """
+        # META-PROMPTING: Melhora prompt inicial
+        best_prompt = init_prompt
+        
+        if self.use_meta_prompting and self.meta_prompter is not None:
+            # Coleta exemplos se não foram coletados ainda
+            if self.train_examples is None:
+                self.train_examples = self._collect_train_examples()
+            
+            # Gera prompts melhorados
+            task_description = getattr(self.task, 'task_description', self.task.task_name)
+            random_examples = random.sample(self.train_examples, 3)
+            improved_prompts = self.meta_prompter.generate_improved_prompts(
+                init_prompt=init_prompt,
+                task_description=task_description,
+                strategy=self.meta_prompt_strategy,
+                num_variants=self.num_meta_prompts,
+                examples=random_examples
+            )
+            
+            # Avalia cada prompt (apenas 10 exemplos para ser rápido)
+            def eval_prompt(prompt):
+                eval_batch = {"question": [], 'answer': []}
+                num_eval_samples = 0
+                max_eval_samples = 10
+                
+                for batch in self.eval_dataloader:
+                    eval_batch['question'] += batch['question']
+                    eval_batch['answer'] += batch['answer']
+                    num_eval_samples += len(batch['question'])
+                    
+                    if num_eval_samples >= max_eval_samples:
+                        eval_batch['question'] = eval_batch['question'][:max_eval_samples]
+                        eval_batch['answer'] = eval_batch['answer'][:max_eval_samples]
+                        break
+                
+                eval_output = self.gradient_descent.forward(batch=eval_batch, cur_prompt=prompt)
+                return self._sort_helper(eval_output['acc'])
+            
+            # Seleciona melhor
+            best_prompt = self.meta_prompter.select_best_prompt(
+                prompts=improved_prompts,
+                eval_function=eval_prompt
+            )
+        
+        # Cria nó raiz
+        node = GraceNode(prompt=best_prompt, action=None, parent=None, mom_prompt=None)
         return node
     
 

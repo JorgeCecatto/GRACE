@@ -1,6 +1,17 @@
 from . import *
 from .grace_world_model import GraceSearchWorldModel
 
+# Tenta importar módulos opcionais
+try:
+    from .difficulty_classifier import DifficultyClassifier
+except ImportError:
+    DifficultyClassifier = None
+
+try:
+    from .meta_prompter import MetaPrompter
+except ImportError:
+    MetaPrompter = None
+
 WORLD_MODELS = {
     'grace': GraceSearchWorldModel,
     }

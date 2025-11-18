@@ -21,14 +21,14 @@ task_setting:
 
 base_model_setting:
   model_type: "ollama"
-  model_name: "gemma3:1b"
+  model_name: "gemma3:4b"
   temperature: 0.7
   api_key: null
   base_model: true
 
 optim_model_setting:
   model_type: "ollama"
-  model_name: "gemma3:1b"
+  model_name: "gemma3:4b"
   api_key: null
   temperature: 0.9
   base_model: false
@@ -41,3 +41,7 @@ world_model_setting:
   num_wrong_sample: 3
   num_new_prompts: 1 
   train_shuffle: true
+
+  use_meta_prompting: true
+  meta_prompt_strategy: "expert_generalist"  # 'expert_generalist', 'task_decomposition', 'zero_shot_cot'
+  num_meta_prompts: 3  # Gera 3 variantes da MESMA estratégia e escolhe a melhor 

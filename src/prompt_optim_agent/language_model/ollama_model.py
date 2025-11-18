@@ -23,7 +23,7 @@ class OllamaModel:
         self.base_url = base_url.rstrip('/')
         self.api_endpoint = f"{self.base_url}/api/chat"
         
-        # Verifica se Ollama está acessível
+        # Rota p ver se o ollama ta funcionando
         try:
             response = requests.get(f"{self.base_url}/api/tags", timeout=5)
             response.raise_for_status()
@@ -74,9 +74,6 @@ class OllamaModel:
                 result = response.json()
                 outputs = result.get('message', {}).get('content', '').strip()
                 
-                # Atualiza contadores globais
-                # Nota: Ollama não retorna tokens como OpenAI
-                # Você pode estimar ou deixar como 0
                 if self.base_model:
                     global_vars.base_api_count += 1
                     global_vars.base_input_token += 0  # Ollama não retorna tokens

@@ -34,6 +34,13 @@ optim_model_setting:
   base_model: false
 
 
+meta_model_setting:
+  model_type: "ollama"
+  model_name: "qwen3:4b"  # Deveria ser um modelo maior para melhor compreensão semântica rs
+  api_key: null
+  temperature: 0.7  # Temperatura moderada para criatividade balanceada
+  base_model: false
+
 world_model_setting:
   iteration_num: 80
   stop_early_thresh: 5

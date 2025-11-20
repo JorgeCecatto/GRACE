@@ -20,7 +20,8 @@ class BaseAgent():
         task_setting: dict,
         base_model_setting: dict,
         optim_model_setting: dict,
-        world_model_setting: dict
+        meta_model_setting: dict = None,
+        world_model_setting: dict = None
         ) -> None:
         """
         BaseAgent: set up task, logger, search algorithm, world model
@@ -60,6 +61,7 @@ class BaseAgent():
         self.task_setting = task_setting
         self.base_model_setting = base_model_setting
         self.optim_model_setting = optim_model_setting
+        self.meta_model_setting = meta_model_setting
         self.world_model_setting = world_model_setting
         
         self.task = get_task(task_name)(**task_setting)
@@ -79,13 +81,21 @@ class BaseAgent():
             base_model_setting["model_type"])(**base_model_setting)
         
         self.optim_model = get_language_model(
-            optim_model_setting["model_type"])(**optim_model_setting) 
+            optim_model_setting["model_type"])(**optim_model_setting)
+        
+        # Meta model (opcional - usado apenas para meta-prompting)
+        if meta_model_setting is not None:
+            self.meta_model = get_language_model(
+                meta_model_setting["model_type"])(**meta_model_setting)
+        else:
+            self.meta_model = None
         
         self.world_model = get_world_model(search_algo)(
             task=self.task, 
             logger=self.logger, 
             base_model=self.base_model,
-            optim_model=self.optim_model, 
+            optim_model=self.optim_model,
+            meta_model=self.meta_model,  # Passa objeto diretamente, como base_model e optim_model
             **world_model_setting
             )
         

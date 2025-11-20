@@ -50,6 +50,17 @@ def validate_config(config):
     if config['optim_model_setting']['model_type'] == 'openai' and config['optim_model_setting']['api_key'] is None:
         raise ValueError("Please set optim model's api key")
     assert isinstance(config['optim_model_setting']['base_model'], bool), "base_model must be a boolean"
+    
+    # Meta model setting (optional - usado apenas se use_meta_prompting=true)
+    if 'meta_model_setting' in config:
+        assert config['meta_model_setting']['model_type'] in ['openai', 'ollama'], \
+            "meta_model.model_type must be 'openai' or 'ollama'"
+        assert config['meta_model_setting']['model_name'] is not None, "meta_model.model_name must be specified"
+        assert isinstance(config['meta_model_setting']['temperature'], float), "meta_model.temperature must be a float"
+        
+        if config['meta_model_setting']['model_type'] == 'openai' and config['meta_model_setting']['api_key'] is None:
+            raise ValueError("Please set meta model's api key")
+    
     # World model setting
     assert isinstance(config['world_model_setting']['iteration_num'], int), "search.iteration_num must be an integer"
     assert isinstance(config['world_model_setting']['stop_early_thresh'], int), "world_model.stop_early_thresh must be an integer"

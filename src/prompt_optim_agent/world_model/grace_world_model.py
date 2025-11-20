@@ -22,8 +22,9 @@ class GraceSearchWorldModel():
         logger,
         
         # model
-        base_model: str,
-        optim_model: str,
+        base_model,
+        optim_model,
+        meta_model = None,  # Modelo dedicado para meta-prompting (opcional)
         iteration_num = 80,
         stop_early_thresh = 5,
         num_wrong_sample = 3,
@@ -50,6 +51,7 @@ class GraceSearchWorldModel():
         self.print_log = print_log if logger is not None else False
         self.base_model = base_model
         self.optim_model = optim_model
+        self.meta_model = meta_model if meta_model else optim_model  # Usa optim_model como fallback
         self.strategy = meta_prompt_strategy
         self.iteration_num = iteration_num
         self.stop_early_thresh = stop_early_thresh
@@ -81,26 +83,66 @@ class GraceSearchWorldModel():
                                                 num_new_prompts = num_new_prompts,
                                                 eval_dataloader = self.eval_dataloader)
         
-        # Inicializa meta-prompter
+        # Inicializa meta-prompter com modelo dedicado
         self.meta_prompter = None
+        self.meta_model_caller = None
         if self.use_meta_prompting:
             if not META_PROMPTER_AVAILABLE:
                 if self.print_log:
                     self.logger.warning("Meta-prompting requested but MetaPrompter not available")
                 self.use_meta_prompting = False
             else:
-                task_description = getattr(self.task, 'task_description', self.task.task_name)
-                
-                # Inicializa MetaPrompter passando o modelo diretamente
-                self.meta_prompter = MetaPrompter(
-                    optim_model=self.gradient_descent.optim_model,
-                    task_description=task_description,
-                    strategy=self.strategy,
-                    logger=self.logger
-                )
+                self._initialize_meta_model()
                 
                 if self.print_log:
-                    self.logger.info("✅ Meta-Prompter initialized")
+                    self.logger.info(f"✅ Meta-Prompter initialized with model: {self.meta_model}")
+    
+    def _initialize_meta_model(self) -> None:
+        """
+        Inicializa modelo dedicado para meta-prompting.
+        
+        Rationale:
+        ---------
+        Usar um modelo separado para meta-prompting oferece vantagens teóricas significativas:
+        
+        1. **Especialização de Tarefa (Task Specialization)**:
+           - Meta-prompting é uma tarefa de meta-aprendizagem que requer habilidades diferentes
+             de geração/otimização de prompts
+           - Um modelo maior/diferente pode ter melhor compreensão semântica do domínio
+           - Permite usar modelos com diferentes trade-offs (criatividade vs. precisão)
+        
+        2. **Separação de Concerns (Separation of Concerns)**:
+           - Meta-model: Entende o domínio e refina descrições (conhecimento de alto nível)
+           - Optim-model: Gera variações de prompts (conhecimento operacional)
+           - Base-model: Executa a tarefa final (conhecimento específico)
+        
+        3. **Diversidade Epistêmica (Epistemic Diversity)**:
+           - Diferentes modelos têm diferentes "viés indutivos" (inductive biases)
+           - Combinar perspectivas de múltiplos modelos pode levar a prompts mais robustos
+           - Reduz overfitting a características específicas de um único modelo
+        
+        4. **Escalabilidade de Recursos (Resource Scaling)**:
+           - Meta-prompting é executado apenas 1x (início)
+           - Permite usar modelos mais caros/lentos nessa fase sem impacto no custo total
+           - Otimização pode usar modelos mais rápidos/baratos para iterações
+        
+        5. **Transferência de Conhecimento (Knowledge Transfer)**:
+           - Modelos maiores (ex: GPT-4) têm melhor compreensão de domínios complexos
+           - Podem transferir esse conhecimento via prompts refinados para modelos menores
+           - Efeito "teacher-student" sem necessidade de fine-tuning
+        """
+        task_description = getattr(self.task, 'task_description', self.task.task_name)
+        
+        # Usa meta_model se fornecido, caso contrário usa optim_model
+        meta_model_caller = self.meta_model if self.meta_model else self.gradient_descent.optim_model
+        
+        # Inicializa MetaPrompter com modelo dedicado
+        self.meta_prompter = MetaPrompter(
+            optim_model=meta_model_caller,
+            task_description=task_description,
+            strategy=self.strategy,
+            logger=self.logger
+        )
     
     def _collect_train_examples(self) -> List[Dict]:
         """Coleta todos os exemplos de treino para meta-prompting."""

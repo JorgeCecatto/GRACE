@@ -59,7 +59,7 @@ def validate_config(config):
     assert isinstance(config['world_model_setting']['num_new_prompts'], int), "world_model.num_new_prompts must be an integer"
 
     assert isinstance(config['world_model_setting']['train_shuffle'], bool), "world_model.train_shuffle must be a boolean"
-
+    
 
 
 

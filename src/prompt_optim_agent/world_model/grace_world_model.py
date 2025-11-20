@@ -3,6 +3,7 @@ from ..test_helper import eval_instruction_with_loader
 from typing import Generic
 from ..search_algo.base_algo import State, Action
 from ..search_algo.grace_search import GraceNode
+from ..curriculum.curriculum_classifier import CurriculumClassifier
 
 from collections import deque
 import random
@@ -227,10 +228,42 @@ class GraceSearchWorldModel():
         return new_nodes, gradient_descent_output
     
     def build_root(self, init_prompt):
+        # Calculate curriculum for the training set
+        self._calculate_curriculum(init_prompt)
+        
         node = GraceNode(prompt=init_prompt, action=None, parent=None,mom_prompt=None)
 
         return node
     
+    def _calculate_curriculum(self, init_prompt):
+        """
+        Calculate curriculum difficulty for all training examples.
+        """
+        self.logger.info("\n" + "🎓"*40)
+        self.logger.info("CALCULATING CURRICULUM FOR TRAINING SET")
+        self.logger.info("🎓"*40)
+        
+        examples = []
+        for batch in self.train_dataloader:
+            for q, a in zip(batch['question'], batch['answer']):
+                examples.append({'question': q, 'answer': a})
+        
+        self.logger.info(f"Processing {len(examples)} training examples...")
+        
+        # Initialize classifier
+        classifier = CurriculumClassifier(
+            task=self.task,
+            base_model=self.base_model,
+            embedding_model='sentence-transformers/all-MiniLM-L6-v2',
+            logger=self.logger
+        )
+        
+        # Classify dataset
+        self.curriculum_examples = classifier.classify_dataset(examples, init_prompt)
+        
+        # Create difficulty map for quick lookup
+        self.difficulty_map = {ex.question: ex.difficulty for ex in self.curriculum_examples}
+        self.logger.info("Curriculum calculation complete.")
 
     def test_prompt(self, prompt):
         metric, eval_output = eval_instruction_with_loader(task=self.task, 

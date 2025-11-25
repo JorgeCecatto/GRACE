@@ -2,7 +2,7 @@ tqdm
 fire
 numpy
 scipy
-datasets
+datasets==3.6.0
 openai
 torch
 pytz

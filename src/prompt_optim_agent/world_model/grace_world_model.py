@@ -70,7 +70,15 @@ class GraceSearchWorldModel():
 
     
 
-    def sample_forward_output(self,forward_output, num_wrong=3, num_right=3):
+    def sample_forward_output(self, forward_output, num_wrong=3, num_right=3, momentum='EASY'):
+        """
+        Sample examples baseado no momentum do nó.
+        
+        Momentum determina a dificuldade dos exemplos selecionados:
+        - EASY: Prioriza exemplos EASY e MEDIUM
+        - MEDIUM: Balanceado entre todas as dificuldades
+        - HARD: Prioriza exemplos MEDIUM e HARD
+        """
         examples = forward_output['examples']
 
         if "ncbi" not in self.task.task_name.lower():
@@ -78,13 +86,32 @@ class GraceSearchWorldModel():
         else:
             valid_examples = examples
     
+        # Enriquecer exemplos com dificuldade do curriculum
+        for ex in valid_examples:
+            if hasattr(self, 'difficulty_map') and ex.get('question') in self.difficulty_map:
+                ex['difficulty'] = self.difficulty_map[ex['question']]
+            else:
+                ex['difficulty'] = 'MEDIUM'  # Default
+        
+        # Separar em corretos e errados
         wrong_samples = [ex for ex in valid_examples if ex['label'] != ex['pred']]
         right_samples = [ex for ex in valid_examples if ex['label'] == ex['pred']]
-
-        selected_wrong = random.sample(wrong_samples, min(num_wrong, len(wrong_samples)))
-        selected_right = random.sample(right_samples, min(num_right, len(right_samples)))
         
-        selected = selected_right+selected_wrong
+        # Filtrar por momentum (curriculum-aware sampling)
+        wrong_filtered = self._filter_by_momentum(wrong_samples, momentum)
+        right_filtered = self._filter_by_momentum(right_samples, momentum)
+        
+        # Sample com fallback para lista original se filtro ficar vazio
+        selected_wrong = random.sample(
+            wrong_filtered if wrong_filtered else wrong_samples,
+            min(num_wrong, len(wrong_filtered) if wrong_filtered else len(wrong_samples))
+        )
+        selected_right = random.sample(
+            right_filtered if right_filtered else right_samples,
+            min(num_right, len(right_filtered) if right_filtered else len(right_samples))
+        )
+        
+        selected = selected_right + selected_wrong
 
         new_forward_output = {
             'cur_prompt': forward_output['cur_prompt'],
@@ -93,6 +120,22 @@ class GraceSearchWorldModel():
             'acc': np.mean([ex['label'] == ex['pred'] for ex in selected])
         }
         return new_forward_output
+    
+    def _filter_by_momentum(self, examples, momentum):
+        """
+        Filtra exemplos baseado no momentum atual.
+        
+        Estratégia de Curriculum Learning:
+        - EASY momentum → Foca em exemplos EASY e MEDIUM
+        - MEDIUM momentum → Aceita todos os níveis
+        - HARD momentum → Foca em exemplos MEDIUM e HARD
+        """
+        if momentum == 'EASY':
+            return [ex for ex in examples if ex.get('difficulty', 'MEDIUM') in ['EASY', 'MEDIUM']]
+        elif momentum == 'HARD':
+            return [ex for ex in examples if ex.get('difficulty', 'MEDIUM') in ['MEDIUM', 'HARD']]
+        else: 
+            return examples
     
 
 
@@ -170,10 +213,22 @@ class GraceSearchWorldModel():
 
             train_forward_output = self.train_forward(cur_prompt=child_node.prompt)
             cur_acc = self._sort_helper(train_forward_output['acc'])
+            
+            # Atualizar train_accuracy e momentum do nó baseado na performance
+            child_node.train_accuracy = cur_acc
+            child_node.momentum = self._calculate_momentum(cur_acc)
+            
+            self.logger.info(f' Node {cur_child_node.id} - Train Accuracy: {cur_acc:.3f} | Momentum: {child_node.momentum}')
+            
             if int(cur_acc)==1:
                 break
            
-            sampled_forward_output = self.sample_forward_output(train_forward_output,self.num_wrong_sample,self.num_correct_sample)
+            sampled_forward_output = self.sample_forward_output(
+                train_forward_output,
+                self.num_wrong_sample,
+                self.num_correct_sample,
+                momentum=child_node.momentum
+            )
 
 
             self.logger.info(f'----------------  OPTIMIZATION batch {iter} ----------------')
@@ -239,9 +294,9 @@ class GraceSearchWorldModel():
         """
         Calculate curriculum difficulty for all training examples.
         """
-        self.logger.info("\n" + "🎓"*40)
+        self.logger.info("\n" + "------"*40)
         self.logger.info("CALCULATING CURRICULUM FOR TRAINING SET")
-        self.logger.info("🎓"*40)
+        self.logger.info("-----"*40)
         
         examples = []
         for batch in self.train_dataloader:
@@ -263,7 +318,29 @@ class GraceSearchWorldModel():
         
         # Create difficulty map for quick lookup
         self.difficulty_map = {ex.question: ex.difficulty for ex in self.curriculum_examples}
-        self.logger.info("Curriculum calculation complete.")
+        self.logger.info("✅ Curriculum calculation complete.")
+    
+    def _calculate_momentum(self, train_accuracy):
+        """
+        Calcula momentum baseado na acurácia no treino.
+        
+        Estratégia Adaptativa de Curriculum Learning:
+        - Alta acurácia (>= 0.7) → HARD: Modelo está dominando, aumentar dificuldade
+        - Média acurácia (0.4-0.7) → MEDIUM: Balancear dificuldade
+        - Baixa acurácia (< 0.4) → EASY: Modelo está lutando, focar em exemplos mais fáceis
+        
+        Args:
+            train_accuracy: Acurácia atual no conjunto de treino (0.0 a 1.0)
+            
+        Returns:
+            momentum: 'EASY', 'MEDIUM' ou 'HARD'
+        """
+        if train_accuracy >= 0.7:
+            return 'HARD'
+        elif train_accuracy >= 0.4:
+            return 'MEDIUM'
+        else:
+            return 'EASY'
 
     def test_prompt(self, prompt):
         metric, eval_output = eval_instruction_with_loader(task=self.task, 

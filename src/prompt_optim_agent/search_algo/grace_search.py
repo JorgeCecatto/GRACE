@@ -30,6 +30,10 @@ class GraceNode(Generic[State, Action]):
         self.parent = parent
         self.children: 'Optional[list[GraceNode]]' = []
         self.batch = None
+        
+        # Momentum: controla dificuldade dos exemplos baseado na performance
+        self.train_accuracy = 0.0  # Acurácia no conjunto de treino
+        self.momentum = 'EASY'  # EASY, MEDIUM, HARD
 
         if parent is None:
             self.depth = 0
@@ -50,6 +54,8 @@ class GraceNode(Generic[State, Action]):
             'eval_metric': self.eval_metric,
             'test_metric': self.test_metric,
             'prompt':self.prompt,
+            'train_accuracy': self.train_accuracy,
+            'momentum': self.momentum
         }
 
 class GraceSearch(SearchAlgo):

@@ -189,8 +189,8 @@ class CurriculumClassifier:
         )
         
         # Extract success/failure
-        correct_mask = np.array(eval_output['correct'])
-        failed_mask = ~(correct_mask)
+        correct_mask = np.array(eval_output['correct'], dtype=bool)
+        failed_mask = ~correct_mask
         
         success_count = correct_mask.sum()
         failure_count = failed_mask.sum()

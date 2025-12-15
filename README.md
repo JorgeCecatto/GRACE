@@ -1,3 +1,5 @@
+## Este repositório é uma adaptação do experimento original agradeço a [WenH](https://github.com/Eric8932/GRACE) pelo excelente trabalho :)
+
 <div align="center">
   <h1>
     No Loss, No Gain: Gated Refinement and Adaptive Compression for Prompt Optimization

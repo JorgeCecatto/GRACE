@@ -4,6 +4,7 @@ from typing import Generic
 from ..search_algo.base_algo import State, Action
 from ..search_algo.grace_search import GraceNode
 from ..curriculum.curriculum_classifier import CurriculumClassifier
+from .prompt_cache import PromptEvaluationCache
 
 from collections import deque
 import random
@@ -58,6 +59,9 @@ class GraceSearchWorldModel():
                                                 optim_model=optim_model, 
                                                 num_new_prompts = num_new_prompts,
                                                 eval_dataloader = self.eval_dataloader)
+        
+        # Initialize prompt evaluation cache
+        self.prompt_cache = PromptEvaluationCache(logger=self.logger)
     def _infinite_data_loader(self, data_loader):
         while True:
             for batch in data_loader:
@@ -153,7 +157,22 @@ class GraceSearchWorldModel():
             return True
         return False
         
-    def train_forward(self,cur_prompt):
+    def train_forward(self, cur_prompt, momentum='MEDIUM'):
+        """
+        Forward pass no conjunto de treino com exemplos ordenados por dificuldade.
+        
+        Anti-curriculum: Sempre exibe exemplos mais difíceis primeiro.
+        
+        Args:
+            cur_prompt: Prompt atual
+            momentum: Nível de momentum para filtrar exemplos
+            
+        Returns:
+            Aggregated output com métricas de todos os batches processados
+        """
+        # Criar dataloader ordenado por dificuldade (HARD → MEDIUM → EASY)
+        sorted_dataloader = self._create_sorted_dataloader(momentum)
+        
         aggregated_output = {
             'cur_prompt': cur_prompt,
             'correct': [],
@@ -161,7 +180,7 @@ class GraceSearchWorldModel():
             'acc': []
         }
         
-        for batch in self.train_dataloader:
+        for batch in sorted_dataloader:
             forward_output_cur = self.gradient_descent.forward(batch=batch, cur_prompt=cur_prompt)
             aggregated_output['correct'] += forward_output_cur['correct']
             aggregated_output['examples'] += forward_output_cur['examples']
@@ -172,6 +191,92 @@ class GraceSearchWorldModel():
         aggregated_output['acc'] = np.mean(aggregated_output['acc'])
 
         return aggregated_output
+    
+    def _create_sorted_dataloader(self, momentum='MEDIUM'):
+        """
+        Cria dataloader com ordenação adaptativa baseada no momentum.
+        
+        Todos os exemplos são incluídos, apenas a ordem muda:
+        - EASY momentum: MEDIUM → HARD → EASY (embaralhado em cada grupo)
+        - MEDIUM momentum: HARD → MEDIUM → EASY (embaralhado em cada grupo)
+        - HARD momentum: HARD → MEDIUM → EASY (embaralhado em cada grupo)
+        
+        Args:
+            momentum: Nível atual ('EASY', 'MEDIUM', 'HARD')
+            
+        Returns:
+            DataLoader com exemplos ordenados e embaralhados por grupo
+        """
+        # Basicamente to tentando aplicar conceitos daqui https://arxiv.org/pdf/2206.14486 juntando com curriculum 
+        all_examples = []
+        for batch in self.train_dataloader:
+            for q, a in zip(batch['question'], batch['answer']):
+                difficulty = self.difficulty_map.get(q, 'MEDIUM')
+                all_examples.append({
+                    'question': q,
+                    'answer': a,
+                    'difficulty': difficulty
+                })
+        
+        # Separar por dificuldade
+        hard_examples = [ex for ex in all_examples if ex['difficulty'] == 'HARD']
+        medium_examples = [ex for ex in all_examples if ex['difficulty'] == 'MEDIUM']
+        easy_examples = [ex for ex in all_examples if ex['difficulty'] == 'EASY']
+        
+        # Embaralhar cada grupo individualmente
+        random.shuffle(hard_examples)
+        random.shuffle(medium_examples)
+        random.shuffle(easy_examples)
+        
+        # Ordenar baseado no momentum
+        if momentum == 'EASY':
+            # Começa do médio → hard → easy
+            sorted_examples = medium_examples + hard_examples + easy_examples
+            order_desc = "MEDIUM → HARD → EASY"
+        elif momentum == 'HARD':
+            # Começa do hard → medium → easy
+            sorted_examples = hard_examples + medium_examples + easy_examples
+            order_desc = "HARD → MEDIUM → EASY"
+        else:  # MEDIUM
+            # Começa do hard → medium → easy
+            #tentei usar o conteido desse https://arxiv.org/pdf/2206.14486, sem mudar mt minha implementação
+            sorted_examples = hard_examples + medium_examples + easy_examples
+            order_desc = "HARD → MEDIUM → EASY"
+        
+        # Log da distribuição
+        self.logger.info(
+            f" Dataloader ordenado (momentum={momentum}): {order_desc}\n"
+            f"   HARD={len(hard_examples)}, MEDIUM={len(medium_examples)}, EASY={len(easy_examples)}\n"
+            f"   Total: {len(sorted_examples)} exemplos (embaralhados dentro de cada grupo)"
+        )
+        
+        # Criar batches mantendo a ordem
+        from torch.utils.data import Dataset, DataLoader
+        
+        class SortedDataset(Dataset):
+            def __init__(self, examples):
+                self.examples = examples
+            
+            def __len__(self):
+                return len(self.examples)
+            
+            def __getitem__(self, idx):
+                return self.examples[idx]
+        
+        dataset = SortedDataset(sorted_examples)
+        
+        # Criar dataloader sem shuffle para manter ordem
+        sorted_loader = DataLoader(
+            dataset,
+            batch_size=8,
+            shuffle=False,  # Mantém ordem definida acima
+            collate_fn=lambda batch: {
+                'question': [ex['question'] for ex in batch],
+                'answer': [ex['answer'] for ex in batch]
+            }
+        )
+        
+        return sorted_loader
         
 
     def _sort_helper(self, metric):
@@ -185,11 +290,9 @@ class GraceSearchWorldModel():
         new_nodes = []
         child_node = node
        
-        #Get train batch
-        # train_batch = {"question":[],'answer':[]}
-        # for batch in self.train_dataloader:
-        #     train_batch['question']+=batch['question']
-        #     train_batch['answer']+=batch['answer']
+        # Herdar cache do nó pai para comparação de prompts
+        if node.parent is not None:
+            self.logger.info(f"Herdando cache do nó pai {node.parent.id}")
 
         #Get eval batch
         eval_batch = {"question":[],'answer':[]}
@@ -211,7 +314,11 @@ class GraceSearchWorldModel():
             cur_child_node = child_node
             self.logger.info(f'------------------  expand node {cur_child_node.id} ---------------------')
 
-            train_forward_output = self.train_forward(cur_prompt=child_node.prompt)
+            # Pass momentum to train_forward
+            train_forward_output = self.train_forward(
+                cur_prompt=child_node.prompt,
+                momentum=child_node.momentum if hasattr(child_node, 'momentum') else 'MEDIUM'
+            )
             cur_acc = self._sort_helper(train_forward_output['acc'])
             
             # Atualizar train_accuracy e momentum do nó baseado na performance
@@ -234,45 +341,112 @@ class GraceSearchWorldModel():
             self.logger.info(f'----------------  OPTIMIZATION batch {iter} ----------------')
             optimized_prompts = self.gradient_descent.step_wrong(child_node.prompt, forward_output = sampled_forward_output)
             for opt_prompt in optimized_prompts:
-                eval_temp_forward_output = self.gradient_descent.forward(batch=eval_batch, cur_prompt=opt_prompt)
+                # Tentar buscar no cache primeiro
+                cached_acc = self.prompt_cache.get(
+                    prompt=opt_prompt,
+                    momentum=child_node.momentum,
+                    current_acc=child_node.train_accuracy
+                )
+                
+                if cached_acc is not None:
+                    # Cache hit - usar acurácia cached
+                    eval_temp_acc = cached_acc
+                else:
+                    # Cache miss - avaliar e adicionar ao cache
+                    eval_temp_forward_output = self.gradient_descent.forward(
+                        batch=eval_batch, 
+                        cur_prompt=opt_prompt
+                    )
+                    eval_temp_acc = eval_temp_forward_output['acc']
+                    
+                    # Armazenar no cache
+                    self.prompt_cache.put(
+                        prompt=opt_prompt,
+                        accuracy=eval_temp_acc,
+                        momentum=child_node.momentum
+                    )
+                if iter % 10 == 0:
+                    stats = self.prompt_cache.get_stats()
+                    self.logger.info(f"Estatísticas do Cache: Taxa de Acertos={stats['hit_rate']:.1f}%, "
+                                   f"Hits={stats['exact_hits'] + stats['similarity_hits']}, "
+                                   f"Misses={stats['misses']}")
+                
                 temp_child_node = GraceNode(
                     prompt=opt_prompt, 
                     action="OPT",
                     mom_prompt=None,
                     parent=cur_child_node,
                     )
-                temp_child_node.eval_metric = (eval_forward_output['acc'],eval_temp_forward_output['acc'])
+                temp_child_node.eval_metric = (eval_forward_output['acc'], eval_temp_acc)
                 new_nodes.append(temp_child_node)
                 
                 #Change current prompt
-                if self._sort_helper(eval_temp_forward_output['acc'])>max_acc:
+                if self._sort_helper(eval_temp_acc)>max_acc:
                     stop_early = 0
-                    max_acc = self._sort_helper(eval_temp_forward_output['acc'])
+                    max_acc = self._sort_helper(eval_temp_acc)
                     child_node = temp_child_node
                     #Re-Split train into correct and wrong samples
-                    # train_forward_output = self.train_forward(cur_prompt=opt_prompt)
-                    eval_forward_output = eval_temp_forward_output
+                    eval_forward_output = {'acc': eval_temp_acc}
                 else:
                     stop_early+=1
 
             if stop_early==self.stop_early_thresh:
                 self.logger.info(f'----------------  SIMPLIFY batch {iter} ----------------')
                 simp_prompt = self.gradient_descent.step_simp(child_node.prompt)
-                eval_temp_forward_output = self.gradient_descent.forward(batch=eval_batch, cur_prompt=simp_prompt)
+                
+                # Tentar buscar no cache primeiro
+                cached_acc = self.prompt_cache.get(
+                    prompt=simp_prompt,
+                    momentum=child_node.momentum,
+                    current_acc=child_node.train_accuracy
+                )
+                
+                if cached_acc is not None:
+                    # Cache hit - usar acurácia cached
+                    eval_temp_acc = cached_acc
+                else:
+                    # Cache miss - avaliar e adicionar ao cache
+                    eval_temp_forward_output = self.gradient_descent.forward(
+                        batch=eval_batch, 
+                        cur_prompt=simp_prompt
+                    )
+                    eval_temp_acc = eval_temp_forward_output['acc']
+                    
+                    # Armazenar no cache
+                    self.prompt_cache.put(
+                        prompt=simp_prompt,
+                        accuracy=eval_temp_acc,
+                        momentum=child_node.momentum
+                    )
+                
                 temp_child_node = GraceNode(
                     prompt=simp_prompt, 
                     action="SIMP",
                     mom_prompt=None,
                     parent=cur_child_node,
                     )
-                temp_child_node.eval_metric = (eval_forward_output['acc'],eval_temp_forward_output['acc'])
+                temp_child_node.eval_metric = (eval_forward_output['acc'], eval_temp_acc)
                 new_nodes.append(temp_child_node)
                 
                 stop_early = 0
-                max_acc = self._sort_helper(eval_temp_forward_output['acc'])
+                max_acc = self._sort_helper(eval_temp_acc)
                 child_node = temp_child_node
-                # train_forward_output = self.train_forward(cur_prompt=opt_prompt)
-                eval_forward_output = eval_temp_forward_output
+                eval_forward_output = {'acc': eval_temp_acc}
+        
+        # Log final cache statistics
+        stats = self.prompt_cache.get_stats()
+        total_hits = stats['exact_hits'] + stats['similarity_hits']
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info(f"📊 Final Cache Statistics for Node {node.id}")
+        self.logger.info(f"{'='*60}")
+        self.logger.info(f"Hit Rate: {stats['hit_rate']:.1%}")
+        self.logger.info(f"Exact Hits: {stats['exact_hits']}")
+        self.logger.info(f"Similarity Hits: {stats['similarity_hits']}")
+        self.logger.info(f"Total Hits: {total_hits}")
+        self.logger.info(f"Cache Misses: {stats['misses']}")
+        self.logger.info(f"Total Queries: {stats['total_queries']}")
+        self.logger.info(f"Time Saved (estimated): ~{total_hits * 90}s")
+        self.logger.info(f"{'='*60}\n")
 
         return new_nodes, None
 
@@ -286,7 +460,28 @@ class GraceSearchWorldModel():
         # Calculate curriculum for the training set
         self._calculate_curriculum(init_prompt)
         
-        node = GraceNode(prompt=init_prompt, action=None, parent=None,mom_prompt=None)
+        # Criar nó raiz
+        node = GraceNode(prompt=init_prompt, action=None, parent=None, mom_prompt=None)
+                
+        # Avaliar acurácia do prompt inicial
+        eval_batch = {"question": [], "answer": []}
+        for batch in self.eval_dataloader:
+            eval_batch['question'] += batch['question']
+            eval_batch['answer'] += batch['answer']
+        
+        initial_eval = self.gradient_descent.forward(batch=eval_batch, cur_prompt=init_prompt)
+        initial_acc = initial_eval['acc']
+        
+        # Adicionar prompt inicial ao cache com momentum MEDIUM (neutro), é importante pq as vzs saem prompt identicos a raíz.
+        self.prompt_cache.put(
+            prompt=init_prompt,
+            accuracy=initial_acc,
+            momentum='MEDIUM'
+        )
+        
+        node.eval_metric = initial_acc
+        
+        self.logger.info(f"Root node added to cache:")
 
         return node
     

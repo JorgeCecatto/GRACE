@@ -542,6 +542,7 @@ class GraceSearchWorldModel():
                                            eval_prompt=prompt,
                                            dataloader=self.test_dataloader,
                                            base_model=self.base_model,
+                                           logger=self.logger,
                                            )
         return metric, eval_output
     

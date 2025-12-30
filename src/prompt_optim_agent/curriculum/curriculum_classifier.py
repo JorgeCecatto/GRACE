@@ -185,7 +185,8 @@ class CurriculumClassifier:
             base_model=self.base_model,
             dataloader=temp_loader,
             temperature=0.0,
-            record_outputs=True
+            record_outputs=True,
+            logger=self.logger
         )
         
         # Extract success/failure

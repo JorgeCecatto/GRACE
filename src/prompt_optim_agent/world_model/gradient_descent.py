@@ -35,10 +35,14 @@ class GradientDescent():
         self._batch_forward_func = self.base_model.batch_forward_func
         
 
-    def forward(self, batch, cur_prompt):
+    def forward(self, batch, cur_prompt, temperature=None):
+        # temperature: override opcional repassado ao modelo base; None usa a
+        # temperatura configurada do modelo (comportamento historico). Passe
+        # 0.0 nas chamadas de PONTUACAO (eval/test) para avaliacao
+        # deterministica — ver docs/curriculo_dois_regimes.md, Secao 9.
         batch_size = len(batch['question'])
         batch_prompts =self._build_forward_prompts_func(batch['question'], cur_prompt)
-        responses = self._batch_forward_func(batch_prompts)
+        responses = self._batch_forward_func(batch_prompts, temperature=temperature)
         
         for index,(p, r) in enumerate(zip(batch_prompts, responses)):
             self.logger.info(f"---------------\t\t{index}\t\t----------------")

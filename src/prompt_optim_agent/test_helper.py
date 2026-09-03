@@ -5,7 +5,7 @@ from tasks import *
 from .utils import *
 
 
-def eval_instruction_with_loader(task, eval_prompt, base_model, dataloader,  temperature=0, record_outputs=True):
+def eval_instruction_with_loader(task, eval_prompt, base_model, dataloader,  temperature=None, record_outputs=True):
     '''
         evaluate cur_prompt on task testing dataset
     '''
@@ -23,7 +23,7 @@ def eval_instruction_with_loader(task, eval_prompt, base_model, dataloader,  tem
     pbar = tqdm(dataloader, leave=False)
     for batch in pbar:
         batch_prompts = build_forward_prompts_func(batch['question'], eval_prompt)
-        responses = batch_forward_func(batch_prompts)
+        responses = batch_forward_func(batch_prompts, temperature=temperature)
         preds = task.batch_clean_responses(responses)
         labels = task.clean_labels(batch['answer'])
         all_preds.extend(preds)

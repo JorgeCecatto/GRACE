@@ -27,6 +27,7 @@ class GraceSearchWorldModel():
         train_batch_size: int = 8,
         test_batch_size: int = 200,
         eval_batch_size: int = 200,
+        eval_temperature = None,
         **kwargs
         ) -> None:
         
@@ -39,6 +40,10 @@ class GraceSearchWorldModel():
         self.stop_early_thresh = stop_early_thresh
         self.num_correct_sample = num_correct_sample
         self.num_wrong_sample = num_wrong_sample
+        # Temperatura usada apenas nas chamadas de PONTUACAO (eval/test). None =
+        # usa a temperatura configurada do modelo (comportamento historico);
+        # 0.0 = avaliacao deterministica. Ver docs/curriculo_dois_regimes.md, Sec. 9.
+        self.eval_temperature = eval_temperature
 
         self.train_dataloader = self.task.get_dataloader('train', 
                                                         batch_size=train_batch_size, 
@@ -199,7 +204,7 @@ class GraceSearchWorldModel():
 
 
         #Get initial eval score
-        eval_forward_output = self.gradient_descent.forward(batch=eval_batch, cur_prompt=child_node.prompt)
+        eval_forward_output = self.gradient_descent.forward(batch=eval_batch, cur_prompt=child_node.prompt, temperature=self.eval_temperature)
         child_node.eval_metric = eval_forward_output['acc']
         max_acc = self._sort_helper(eval_forward_output['acc'])
 
@@ -234,7 +239,7 @@ class GraceSearchWorldModel():
             self.logger.info(f'----------------  OPTIMIZATION batch {iter} ----------------')
             optimized_prompts = self.gradient_descent.step_wrong(child_node.prompt, forward_output = sampled_forward_output)
             for opt_prompt in optimized_prompts:
-                eval_temp_forward_output = self.gradient_descent.forward(batch=eval_batch, cur_prompt=opt_prompt)
+                eval_temp_forward_output = self.gradient_descent.forward(batch=eval_batch, cur_prompt=opt_prompt, temperature=self.eval_temperature)
                 temp_child_node = GraceNode(
                     prompt=opt_prompt, 
                     action="OPT",
@@ -258,7 +263,7 @@ class GraceSearchWorldModel():
             if stop_early==self.stop_early_thresh:
                 self.logger.info(f'----------------  SIMPLIFY batch {iter} ----------------')
                 simp_prompt = self.gradient_descent.step_simp(child_node.prompt)
-                eval_temp_forward_output = self.gradient_descent.forward(batch=eval_batch, cur_prompt=simp_prompt)
+                eval_temp_forward_output = self.gradient_descent.forward(batch=eval_batch, cur_prompt=simp_prompt, temperature=self.eval_temperature)
                 temp_child_node = GraceNode(
                     prompt=simp_prompt, 
                     action="SIMP",
@@ -343,10 +348,11 @@ class GraceSearchWorldModel():
             return 'EASY'
 
     def test_prompt(self, prompt):
-        metric, eval_output = eval_instruction_with_loader(task=self.task, 
+        metric, eval_output = eval_instruction_with_loader(task=self.task,
                                            eval_prompt=prompt,
                                            dataloader=self.test_dataloader,
                                            base_model=self.base_model,
+                                           temperature=self.eval_temperature,
                                            )
         return metric, eval_output
     

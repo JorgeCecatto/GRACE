@@ -30,22 +30,24 @@ class OllamaModel:
         except Exception as e:
             raise ConnectionError(f"Não foi possível conectar ao Ollama em {self.base_url}: {e}")
 
-    def generate(self, input: str) -> str:
+    def generate(self, input: str, temperature: Optional[float] = None) -> str:
         """
         Gera uma resposta a partir de um prompt.
-        
+
         Args:
             input: prompt de entrada
-            
+            temperature: override opcional; se None, usa self.temperature
+
         Returns:
             resposta do modelo como string
         """
         assert isinstance(input, str)
-        
+
         sleep_time = 20
         max_retry = 5
         outputs = None
 
+        resolved_temperature = self.temperature if temperature is None else temperature
         payload = {
             "model": self.model,
             "messages": [
@@ -54,7 +56,7 @@ class OllamaModel:
             ],
             "stream": False,
             "options": {
-                "temperature": self.temperature
+                "temperature": resolved_temperature
             }
         }
 
@@ -101,23 +103,24 @@ class OllamaModel:
 
         return outputs if outputs else ""
 
-    def batch_forward_func(self, batch_prompts: List[str]) -> List[str]:
+    def batch_forward_func(self, batch_prompts: List[str], temperature: Optional[float] = None) -> List[str]:
         """
         Processa um batch de prompts em paralelo.
-        
+
         Args:
             batch_prompts: lista de prompts
-            
+            temperature: override opcional repassado a generate
+
         Returns:
             lista de respostas do modelo
         """
         outputs = [0] * len(batch_prompts)
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        
+
         # Ollama local: use menos workers para não sobrecarregar
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_to_index = {
-                executor.submit(self.generate, batch_prompts[i]): i 
+                executor.submit(self.generate, batch_prompts[i], temperature): i
                 for i in range(len(batch_prompts))
             }
             for future in as_completed(future_to_index):

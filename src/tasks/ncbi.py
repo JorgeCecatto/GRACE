@@ -277,7 +277,7 @@ class CustomTask(BaseTask):
         self.answer_format_prompt= "Output the answer in this format:{entity_1,entity_2,....}. If no disease entities are present, please output an empty list in this format: {}."
         
     def load_task_dataset(self, data_dir):
-        return load_dataset("ncbi_disease").filter(lambda example: len(example["ner_tags"]) > 0)
+        return load_dataset("ncbi/ncbi_disease", trust_remote_code=True).filter(lambda example: len(example["ner_tags"]) > 0)
     
     @staticmethod
     def extract_entities(tokens, ner_tags):

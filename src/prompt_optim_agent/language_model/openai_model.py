@@ -15,23 +15,60 @@ class OpenAIModel():
         api_key: str,
         temperature: float,
         base_model : bool,
+        base_url: str = None,
+        model_url_slug: str = None,
+        provider_sort: str = None,
         **kwargs):
         self.temperature = temperature
         self.model = model_name
         self.base_model = base_model
+        # Preferencia de roteamento do OpenRouter (ex.: "price", "throughput",
+        # "latency"). Enviada via extra_body em cada chamada; None = padrao do
+        # provedor. Ver https://openrouter.ai/docs/features/provider-routing
+        self.provider_sort = provider_sort
 
         if api_key is None:
             raise ValueError(f"api_key error: {api_key}")
-        self.client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+        # Comportamento de "model_url_slug":
+        #   None -> derivado do model_name (sem o prefixo de organizacao, em
+        #           minusculas e com "." trocado por "-"). Comportamento legado.
+        #           Ex.: "Qwen/Qwen2.5-14B-Instruct-AWQ" -> "qwen2-5-14b-instruct-awq"
+        #   ""   -> nenhum slug e anexado; a base_url e usada como esta. Usado
+        #           por provedores como o OpenRouter, onde o modelo vai apenas
+        #           no corpo da requisicao.
+        #   str  -> usado tal como esta.
+        if base_url is not None:
+            slug = self._model_name_to_slug(model_name) if model_url_slug is None else model_url_slug
+            resolved_base_url = base_url.rstrip("/")
+            if slug:
+                resolved_base_url = f"{resolved_base_url}/{slug}"
+        else:
+            resolved_base_url = "https://api.deepseek.com"
+
+        self.client = OpenAI(api_key=api_key, base_url=resolved_base_url)
+
+    @staticmethod
+    def _model_name_to_slug(model_name: str) -> str:
+        # Remove o prefixo de organizacao ("Qwen/...") e normaliza o nome para
+        # o formato usado na url do servidor.
+        name = model_name.split("/")[-1]
+        return name.lower().replace(".", "-")
 
 
-    def generate(self, input):
+    def generate(self, input, temperature=None):
         assert isinstance(input, str)
-    
-        query = input.replace('"', '\\"') 
+
+        query = input.replace('"', '\\"')
         sleep_time = 20
         max_retry = 5
         outputs = None
+        resolved_temperature = self.temperature if temperature is None else temperature
+
+        # Parametros nao-padrao da OpenAI (ex.: roteamento do OpenRouter) vao via
+        # extra_body. Vazio para os demais provedores.
+        extra_body = {}
+        if self.provider_sort:
+            extra_body["provider"] = {"sort": self.provider_sort}
 
         for i in range(int(max_retry + 1)):
             if i > 0:
@@ -47,7 +84,8 @@ class OpenAIModel():
                         {"role": "user", "content": query},
                     ],
                     stream=False,
-                    temperature=self.temperature,
+                    temperature=resolved_temperature,
+                    extra_body=extra_body,
                 )
                 outputs = response.choices[0].message.content.strip()
                 
@@ -69,11 +107,11 @@ class OpenAIModel():
         return outputs
 
     
-    def batch_forward_func(self, batch_prompts):
+    def batch_forward_func(self, batch_prompts, temperature=None):
         outputs = [0]*len(batch_prompts)
         from concurrent.futures import ThreadPoolExecutor, as_completed
         with ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_index = {executor.submit(self.generate, batch_prompts[i]): i for i in range(len(batch_prompts))}
+            future_to_index = {executor.submit(self.generate, batch_prompts[i], temperature): i for i in range(len(batch_prompts))}
             for future in as_completed(future_to_index):
                 index = future_to_index[future]
                 try:

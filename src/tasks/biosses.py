@@ -36,7 +36,7 @@ class CustomTask(BaseTask):
             return "C"
             
     def load_task_dataset(self, **kwargs):
-        dataset = load_dataset('biosses')
+        dataset = load_dataset('tabilab/biosses')
         question_format = "Sentence1: {sentence1}\nSentence2: {sentence2}\nOptions:\n(A) not similar\n(B) somewhat similar\n(C) similar"
         new_dataset = []
         for example in dataset['train']:

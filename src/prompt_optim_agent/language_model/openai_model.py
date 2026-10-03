@@ -18,6 +18,7 @@ class OpenAIModel():
         base_url: str = None,
         model_url_slug: str = None,
         provider_sort: str = None,
+        max_tokens: int = None,
         **kwargs):
         self.temperature = temperature
         self.model = model_name
@@ -26,6 +27,11 @@ class OpenAIModel():
         # "latency"). Enviada via extra_body em cada chamada; None = padrao do
         # provedor. Ver https://openrouter.ai/docs/features/provider-routing
         self.provider_sort = provider_sort
+        # Teto de tokens da resposta (reasoning + conteudo final somados, para
+        # modelos com reasoning). Evita chamadas presas gerando reasoning sem
+        # nunca produzir a resposta final. Parametro padrao da API OpenAI,
+        # None = sem teto explicito (usa o default do provedor).
+        self.max_tokens = max_tokens
 
         if api_key is None:
             raise ValueError(f"api_key error: {api_key}")
@@ -60,22 +66,29 @@ class OpenAIModel():
 
         query = input.replace('"', '\\"')
         sleep_time = 20
+        length_retry_sleep = 3
         max_retry = 5
         outputs = None
         resolved_temperature = self.temperature if temperature is None else temperature
 
-        # Parametros nao-padrao da OpenAI (ex.: roteamento do OpenRouter) vao via
-        # extra_body. Vazio para os demais provedores.
+        # Parametros nao-padrao da OpenAI (ex.: roteamento do OpenRouter) vao
+        # via extra_body. Vazio para os demais provedores.
         extra_body = {}
         if self.provider_sort:
             extra_body["provider"] = {"sort": self.provider_sort}
 
+        create_kwargs = {}
+        if self.max_tokens:
+            create_kwargs["max_tokens"] = self.max_tokens
+
+        next_sleep = sleep_time
         for i in range(int(max_retry + 1)):
             if i > 0:
                 print(
-                    f"Generation: retry {i}/{max_retry} after sleeping for {sleep_time:.0f} seconds."
+                    f"Generation: retry {i}/{max_retry} after sleeping for {next_sleep:.0f} seconds."
                 )
-                time.sleep(sleep_time)
+                time.sleep(next_sleep)
+            next_sleep = sleep_time
             try:
                 response = self.client.chat.completions.create(
                     model=self.model,
@@ -86,15 +99,26 @@ class OpenAIModel():
                     stream=False,
                     temperature=resolved_temperature,
                     extra_body=extra_body,
+                    **create_kwargs,
                 )
-                outputs = response.choices[0].message.content.strip()
-                
+                content = response.choices[0].message.content
+                if content is None or not content.strip():
+                    if response.choices[0].finish_reason == "length":
+                        print(
+                            "Generation: max_tokens atingido (finish_reason=length) "
+                            "sem produzir resposta final."
+                        )
+                        next_sleep = length_retry_sleep
+                    outputs = None
+                    continue
+                outputs = content.strip()
+
             except Exception as e:
                 print(f"Unexpected error: {e}")
                 continue
             if outputs:
                 break
-          
+
         if self.base_model :
             global_vars.base_api_count +=1
             global_vars.base_input_token +=response.usage.prompt_tokens

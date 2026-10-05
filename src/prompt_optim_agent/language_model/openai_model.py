@@ -19,6 +19,7 @@ class OpenAIModel():
         model_url_slug: str = None,
         provider_sort: str = None,
         max_tokens: int = None,
+        provider_ignore: list = None,
         **kwargs):
         self.temperature = temperature
         self.model = model_name
@@ -27,6 +28,9 @@ class OpenAIModel():
         # "latency"). Enviada via extra_body em cada chamada; None = padrao do
         # provedor. Ver https://openrouter.ai/docs/features/provider-routing
         self.provider_sort = provider_sort
+        # Lista de provedores do OpenRouter a ignorar no roteamento (campo
+        # provider.ignore). None/vazio = nenhum provedor excluido.
+        self.provider_ignore = provider_ignore
         # Teto de tokens da resposta (reasoning + conteudo final somados, para
         # modelos com reasoning). Evita chamadas presas gerando reasoning sem
         # nunca produzir a resposta final. Parametro padrao da API OpenAI,
@@ -74,8 +78,13 @@ class OpenAIModel():
         # Parametros nao-padrao da OpenAI (ex.: roteamento do OpenRouter) vao
         # via extra_body. Vazio para os demais provedores.
         extra_body = {}
+        provider_prefs = {}
         if self.provider_sort:
-            extra_body["provider"] = {"sort": self.provider_sort}
+            provider_prefs["sort"] = self.provider_sort
+        if self.provider_ignore:
+            provider_prefs["ignore"] = list(self.provider_ignore)
+        if provider_prefs:
+            extra_body["provider"] = provider_prefs
 
         create_kwargs = {}
         if self.max_tokens:

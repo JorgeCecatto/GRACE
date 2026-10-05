@@ -34,6 +34,8 @@ class GraceNode(Generic[State, Action]):
         # Momentum: controla dificuldade dos exemplos baseado na performance
         self.train_accuracy = 0.0  # Acurácia no conjunto de treino
         self.momentum = 'EASY'  # EASY, MEDIUM, HARD
+        # curriculum_mode='bayes': estatística r do teste de regressão (só para log)
+        self.regression_r = None
 
         if parent is None:
             self.depth = 0
@@ -55,7 +57,8 @@ class GraceNode(Generic[State, Action]):
             'test_metric': self.test_metric,
             'prompt':self.prompt,
             'train_accuracy': self.train_accuracy,
-            'momentum': self.momentum
+            'momentum': self.momentum,
+            'regression_r': self.regression_r
         }
 
 class GraceSearch(SearchAlgo):

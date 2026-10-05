@@ -10,9 +10,11 @@ from .curriculum_classifier import (
     CurriculumExample,
     DifficultyLevel
 )
+from .difficulty_tracker import DifficultyTracker
 
 __all__ = [
     'CurriculumClassifier',
     'CurriculumExample',
-    'DifficultyLevel'
+    'DifficultyLevel',
+    'DifficultyTracker'
 ]

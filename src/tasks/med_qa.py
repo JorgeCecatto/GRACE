@@ -29,7 +29,7 @@ class CustomTask(BaseTask):
     
 
     def load_task_dataset(self, **kwargs):
-        dataset = load_dataset("bigbio/med_qa", trust_remote_code=True)
+        dataset = load_dataset("bigbio/med_qa", "med_qa_en_source")
         new_dataset = dict(train=[], test=[])
 
         def process_split(split_name):

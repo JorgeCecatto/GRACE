@@ -459,6 +459,19 @@ class DifficultyTracker:
         it = self.items.get(key)
         return None if it is None else float(self._posterior(it))
 
+    def beta_params(self, key: str) -> Tuple[float, float]:
+        """
+        Parâmetros (alpha, beta) do posterior Beta do exemplo (train_order='thompson'):
+        alpha = kappa*m + s, beta = kappa*(1-m) + n - s, com s e n da janela.
+        Média alpha/(alpha+beta) = p_hat (ver _posterior). Chave desconhecida: (1, 1).
+        """
+        it = self.items.get(key)
+        if it is None:
+            return 1.0, 1.0
+        n = len(it['hist'])
+        s = sum(c for c, _ in it['hist'])
+        return self.kappa * it['m'] + s, self.kappa * (1.0 - it['m']) + n - s
+
     def snapshot_p_hat(self) -> Dict[str, float]:
         """p_hat atual de todos os exemplos (referência congelada por incumbente)."""
         return {k: float(self._posterior(it)) for k, it in self.items.items()}

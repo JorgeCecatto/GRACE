@@ -36,6 +36,10 @@ class GraceNode(Generic[State, Action]):
         self.momentum = 'EASY'  # EASY, MEDIUM, HARD
         # curriculum_mode='bayes': estatística r do teste de regressão (só para log)
         self.regression_r = None
+        # acceptance_mode='evidence': True se o candidato foi rejeitado cedo e
+        # eval_metric é uma ESTIMATIVA (avaliação parcial); ver docs/lose_to_win.md
+        self.eval_estimated = False
+        self.eval_n_items = None
 
         if parent is None:
             self.depth = 0
@@ -48,7 +52,7 @@ class GraceNode(Generic[State, Action]):
         else:
             p_id = self.parent.id
         
-        return {
+        d = {
             'id': self.id,
             'action':self.action,
             'depth':self.depth,
@@ -60,6 +64,11 @@ class GraceNode(Generic[State, Action]):
             'momentum': self.momentum,
             'regression_r': self.regression_r
         }
+        if self.eval_estimated:
+            # só aparece em acceptance_mode='evidence' (default: results.json inalterado)
+            d['eval_estimated'] = True
+            d['eval_n_items'] = self.eval_n_items
+        return d
 
 class GraceSearch(SearchAlgo):
 
@@ -142,7 +151,7 @@ class GraceSearch(SearchAlgo):
         best_nodes = [node for node, score in scored_nodes if score == max_metric]
 
         for node in best_nodes:
-            node.test_metric, _ = self.world_model.test_prompt(node.prompt)
+            node.test_metric, _ = self.world_model.test_prompt(node.prompt, node_id=node.id)
 
         cost_dic = {"base_api_count":global_vars.base_api_count,"base_input_token":global_vars.base_input_token,"base_output_token":global_vars.base_output_token,
                     "target_api_count":global_vars.target_api_count,"target_input_token":global_vars.target_input_token,"target_output_token":global_vars.target_output_token,}        

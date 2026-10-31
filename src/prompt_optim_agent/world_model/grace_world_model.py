@@ -8,6 +8,7 @@ from ..curriculum.difficulty_tracker import DifficultyTracker, trace
 from .evidence_gate import EvidenceGate
 
 from collections import deque
+import hashlib
 import random
 import numpy as np
 
@@ -56,6 +57,13 @@ class GraceSearchWorldModel():
         evidence_mc_samples: int = 2000,      # amostras Monte Carlo para P(Delta_total >= m)
         evidence_batch_size: int = None,      # tamanho do lote sequencial; None = eval_batch_size
         evidence_seed: int = 0,               # seed do Monte Carlo (rng próprio)
+        evidence_rule: str = 'exact',         # 'exact' (limite exato, sem MC/warmup) | 'statistical' (MC + warmup)
+        reuse_duplicates: bool = True,        # reaproveita o vetor do eval de prompts idênticos (acceptance_mode='evidence')
+
+        # seleção final / teste (lidos por GraceSearch.prepare_output)
+        final_selection: str = 'incumbent',   # 'incumbent' | 'legacy_ties'
+        test_root: bool = True,               # testa também o prompt raiz
+        test_all_incumbents: bool = False,    # testa cada incumbente da cadeia
 
         # ordenação do treino por Thompson (só tem efeito com curriculum_mode='bayes')
         train_order: str = 'default',         # 'default' | 'thompson'
@@ -66,6 +74,8 @@ class GraceSearchWorldModel():
         ) -> None:
 
         assert acceptance_mode in ('strict', 'evidence_shadow', 'evidence'), f"acceptance_mode inválido: {acceptance_mode}"
+        assert evidence_rule in ('exact', 'statistical'), f"evidence_rule inválido: {evidence_rule}"
+        assert final_selection in ('incumbent', 'legacy_ties'), f"final_selection inválido: {final_selection}"
         assert train_order in ('default', 'thompson'), f"train_order inválido: {train_order}"
         assert no_fixable_action in ('log', 'simp', 'stop'), f"no_fixable_action inválido: {no_fixable_action}"
         assert curriculum_mode in ('static', 'bayes', 'off'), f"curriculum_mode inválido: {curriculum_mode}"
@@ -101,6 +111,17 @@ class GraceSearchWorldModel():
         # Acertos por item (0/1, ordem fixa do eval) da avaliação que gerou o max_acc
         # do incumbente atual. Sempre mantido (instrumentação); base do teste pareado.
         self._inc_eval_correct = None
+        # Cadeia de incumbentes em ordem (ids): raiz, OPT aceitos e SIMP. Base do
+        # final_selection='incumbent' em GraceSearch.prepare_output.
+        self.incumbent_ids = []
+        # Cache exato de avaliações COMPLETAS no eval: prompt.strip() -> vetor 0/1;
+        # _eval_cache_origin: prompt.strip() -> id do nó que gerou a entrada.
+        # Nunca guarda vetores parciais.
+        self._eval_cache = {}
+        self._eval_cache_origin = {}
+        self.final_selection = final_selection
+        self.test_root = bool(test_root)
+        self.test_all_incumbents = bool(test_all_incumbents)
 
         # Thompson (train_order='thompson'): só com curriculum_mode='bayes'
         self.train_order = train_order
@@ -152,6 +173,12 @@ class GraceSearchWorldModel():
 
         # Aceitação por evidência (strict = comportamento original, sem gate)
         self.acceptance_mode = acceptance_mode
+        self.evidence_rule = evidence_rule
+        self.reuse_duplicates = bool(reuse_duplicates)
+        if self.reuse_duplicates and eval_temperature not in (0, 0.0):
+            self.logger.info(
+                "AVISO: reuse_duplicates assume avaliação determinística, mas "
+                f"eval_temperature={eval_temperature}. Use 0.0.")
         self.gate = None
         self._n_eval = len(self.eval_dataloader.dataset)
         self._evidence_lot_size = int(evidence_batch_size) if evidence_batch_size else int(eval_batch_size)
@@ -159,15 +186,27 @@ class GraceSearchWorldModel():
             # A métrica de aceitação precisa ser a acurácia (média de 'correct'); o NCBI usa F1.
             assert "ncbi" not in self.task.task_name.lower(), \
                 "acceptance_mode != 'strict' não é suportado no NCBI (a métrica de aceitação é F1, não acurácia)."
-            self.gate = EvidenceGate(
-                n_items=self._n_eval,
-                margin=evidence_margin,
-                risk=evidence_delta,
-                kappa=evidence_kappa,
-                warmup=evidence_warmup,
-                mc_samples=evidence_mc_samples,
-                seed=evidence_seed,
-            )
+            if evidence_rule == 'exact':
+                # Regra exata: sem Monte Carlo e sem aquecimento (evidence_delta,
+                # evidence_warmup e evidence_mc_samples são ignorados). kappa/seed só
+                # afetam a ORDEM de avaliação, nunca a decisão.
+                self.gate = EvidenceGate(
+                    n_items=self._n_eval,
+                    margin=evidence_margin,
+                    kappa=evidence_kappa,
+                    warmup=0,
+                    seed=evidence_seed,
+                )
+            else:
+                self.gate = EvidenceGate(
+                    n_items=self._n_eval,
+                    margin=evidence_margin,
+                    risk=evidence_delta,
+                    kappa=evidence_kappa,
+                    warmup=evidence_warmup,
+                    mc_samples=evidence_mc_samples,
+                    seed=evidence_seed,
+                )
             if self._evidence_lot_size >= self._n_eval:
                 self.logger.info(
                     f"AVISO: lote sequencial ({self._evidence_lot_size}) >= itens do eval ({self._n_eval}): "
@@ -566,6 +605,8 @@ class GraceSearchWorldModel():
             'items': [{'idx': j, 'q': q[:80]} for j, q in enumerate(eval_batch['question'])],
         })
         self._inc_eval_correct = self._correct_vector(eval_forward_output)
+        self.incumbent_ids = [child_node.id]
+        self._cache_put(child_node.prompt, self._inc_eval_correct, child_node.id)
         self._trace_eval(child_node, None, 'ROOT', None, eval_forward_output)
         if self.curriculum_mode == 'bayes':
             self._set_incumbent(child_node, 0)
@@ -636,6 +677,7 @@ class GraceSearchWorldModel():
                 self.num_correct_sample,
                 momentum=child_node.momentum
             )
+            self._trace_train_items(iter, cur_child_node, train_forward_output, sampled_forward_output)
             if self.curriculum_mode == 'bayes':
                 self._trace_iteration(iter, child_node, cur_acc, regression, regression_iter)
                 if self._last_sampling['regime_triggered']:
@@ -646,13 +688,16 @@ class GraceSearchWorldModel():
             optimized_prompts = self.gradient_descent.step_wrong(child_node.prompt, forward_output = sampled_forward_output)
             for opt_prompt in optimized_prompts:
                 incumbent_node = child_node  # incumbente contra o qual este candidato é avaliado
-                eval_temp_forward_output, ev = self._eval_candidate(opt_prompt, eval_batch)
+                # O nó é criado antes da avaliação para que os traces de duplicados
+                # conheçam o node_id (o contador de ids não muda: nada cria nós no meio).
                 temp_child_node = GraceNode(
                     prompt=opt_prompt,
                     action="OPT",
                     mom_prompt=None,
                     parent=cur_child_node,
                     )
+                eval_temp_forward_output, ev = self._eval_candidate(
+                    opt_prompt, eval_batch, node=temp_child_node, incumbent=incumbent_node)
                 temp_child_node.eval_metric = (eval_forward_output['acc'],eval_temp_forward_output['acc'])
                 new_nodes.append(temp_child_node)
                 estimated = bool(ev and ev.get('rejected_early'))
@@ -683,6 +728,7 @@ class GraceSearchWorldModel():
                     max_acc = cand_acc
                     child_node = temp_child_node
                     self._inc_eval_correct = self._correct_vector(eval_temp_forward_output)
+                    self.incumbent_ids.append(child_node.id)
                     if self.curriculum_mode == 'bayes':
                         self._set_incumbent(child_node, iter + 1)
                     #Re-Split train into correct and wrong samples
@@ -697,7 +743,7 @@ class GraceSearchWorldModel():
                 stop_early = 0
 
         if self.gate is not None:
-            trace(self.logger, 'evidence_summary', self.gate.summary())
+            trace(self.logger, 'evidence_summary', {**self.gate.summary(), 'rule': self.evidence_rule})
         if self.curriculum_mode == 'bayes':
             self.tracker.log_state('step_end', with_items=True)
 
@@ -730,6 +776,8 @@ class GraceSearchWorldModel():
         max_acc = self._sort_helper(eval_temp_forward_output['acc'])
         child_node = temp_child_node
         self._inc_eval_correct = self._correct_vector(eval_temp_forward_output)
+        self.incumbent_ids.append(child_node.id)
+        self._cache_put(simp_prompt, self._inc_eval_correct, child_node.id)  # SIMP é avaliado por inteiro
         if self.curriculum_mode == 'bayes':
             self._set_incumbent(child_node, iter + 1)
         # train_forward_output = self.train_forward(cur_prompt=opt_prompt)
@@ -741,24 +789,61 @@ class GraceSearchWorldModel():
         """Acertos por item (0/1) na ordem fixa do eval."""
         return np.asarray([int(c) for c in forward_output['correct']], dtype=int)
 
-    def _eval_candidate(self, opt_prompt, eval_batch):
+    # ----------------------------------------------------- cache de avaliações
+    @staticmethod
+    def _cache_key(prompt):
+        return prompt.strip()
+
+    def _cache_put(self, prompt, vec, node_id):
+        """Guarda o vetor COMPLETO do eval (nunca parcial). A 1ª entrada de cada prompt vence."""
+        key = self._cache_key(prompt)
+        vec = np.asarray(vec, dtype=int)
+        assert len(vec) == self._n_eval and (vec >= 0).all(), "só vetores completos entram no cache"
+        if key not in self._eval_cache:
+            self._eval_cache[key] = vec.copy()
+            self._eval_cache_origin[key] = node_id
+
+    def _eval_candidate(self, opt_prompt, eval_batch, node=None, incumbent=None):
         """
         Avalia um candidato OPT no eval conforme acceptance_mode. Devolve
-        (forward_output, ev); ev é None em 'strict'.
+        (forward_output, ev); ev é None em 'strict'. `node` é o GraceNode do
+        candidato (só para ids nos traces e no cache).
         - strict: forward completo, como sempre.
         - evidence_shadow: forward completo (decisão = strict) + simulação do que a
-          regra sequencial teria feito (ev['shadow']).
-        - evidence: aquecimento = avaliação completa; depois, avaliação sequencial com
-          rejeição precoce. ev['accepted'] decide (Delta >= m).
+          regra sequencial teria feito (ev['shadow']), pela regra exata ou estatística.
+        - evidence: regra exata (run_exact) ou estatística (aquecimento + MC).
+          ev['accepted'] decide (Delta >= m). Com reuse_duplicates, um prompt já
+          avaliado por inteiro reaproveita o vetor guardado (custo 0).
         """
+        node_id = node.id if node is not None else None
         if self.acceptance_mode == 'strict':
-            return self.gradient_descent.forward(
-                batch=eval_batch, cur_prompt=opt_prompt, temperature=self.eval_temperature), None
+            out = self.gradient_descent.forward(
+                batch=eval_batch, cur_prompt=opt_prompt, temperature=self.eval_temperature)
+            self._cache_put(opt_prompt, self._correct_vector(out), node_id)
+            return out, None
 
         gate = self.gate
+        exact = self.evidence_rule == 'exact'
         inc = np.asarray(self._inc_eval_correct, dtype=int)
         assert len(inc) == len(eval_batch['question']) == gate.n, "tamanho do eval inconsistente com o gate"
-        warm = gate.in_warmup()
+        warm = gate.in_warmup()  # sempre False na regra exata (warmup=0)
+        key = self._cache_key(opt_prompt)
+
+        # Reuso exato de duplicados: nenhuma chamada ao modelo; decide com o vetor completo.
+        if self.acceptance_mode == 'evidence' and self.reuse_duplicates and key in self._eval_cache:
+            cand = self._eval_cache[key].copy()
+            delta = int(((cand == 1) & (inc == 0)).sum() - ((cand == 0) & (inc == 1)).sum())
+            origin = self._eval_cache_origin.get(key)
+            trace(self.logger, 'duplicate_reuse', {
+                'node_id': node_id, 'duplicate_of_node_id': origin, 'n_items_saved': int(len(cand)),
+            })
+            ev = {
+                'accepted': delta >= gate.margin, 'rejected_early': False, 'cand_correct': cand,
+                'n_evaluated': 0,  # custo real = 0 chamadas (o vetor é completo)
+                'delta': delta, 'delta_full': delta, 'steps': [], 'warmup': False,
+                'reused': True, 'duplicate_of_node_id': origin,
+            }
+            return {'cur_prompt': opt_prompt, 'correct': cand.tolist(), 'acc': float(np.mean(cand))}, ev
 
         if self.acceptance_mode == 'evidence' and not warm:
             def fetch_lot(idx):
@@ -768,23 +853,29 @@ class GraceSearchWorldModel():
                     batch=sub, cur_prompt=opt_prompt, temperature=self.eval_temperature)
                 return [int(c) for c in out['correct']]
 
-            res = gate.run(inc, fetch_lot, self._evidence_lot_size)
+            if exact:
+                res = gate.run_exact(inc, fetch_lot, self._evidence_lot_size)
+            else:
+                res = gate.run(inc, fetch_lot, self._evidence_lot_size)
             cand = res['cand_correct']
             gate.update(inc, cand)
             n = len(cand)
             if res['rejected_early']:
-                # ESTIMATIVA: acerto esperado do incumbente + Delta esperado até o fim,
-                # limitada a ficar abaixo da acurácia do incumbente, para que um
-                # candidato rejeitado nunca vire "melhor nó" em prepare_output.
+                # Acurácia registrada: limitada a ficar abaixo da do incumbente, para que
+                # um candidato rejeitado nunca vire "melhor nó" em prepare_output.
+                # Regra estatística: est_delta_total é uma ESTIMATIVA; regra exata: é o
+                # LIMITE SUPERIOR de Delta_final (nos dois casos o valor é só um marcador).
                 est = (int(inc.sum()) + res['est_delta_total']) / n
                 acc = max(0.0, min(est, (int(inc.sum()) - 1) / n))
                 res['raw_estimate'] = float(est)
             else:
                 acc = np.mean(cand.tolist())
+                self._cache_put(opt_prompt, cand, node_id)  # avaliação completa
             res['warmup'] = False
+            res['rule'] = self.evidence_rule
             return {'cur_prompt': opt_prompt, 'correct': cand.tolist(), 'acc': acc}, res
 
-        # strict-equivalente: avaliação completa (aquecimento, ou modo sombra)
+        # avaliação completa: aquecimento (regra estatística) ou modo sombra
         out = self.gradient_descent.forward(
             batch=eval_batch, cur_prompt=opt_prompt, temperature=self.eval_temperature)
         cand = self._correct_vector(out)
@@ -793,10 +884,43 @@ class GraceSearchWorldModel():
         if self.acceptance_mode == 'evidence':
             ev['accepted'] = delta >= gate.margin
         else:
-            ev['shadow'] = None if warm else gate.run(
-                inc, lambda idx: cand[idx], self._evidence_lot_size, record_all=True)
+            if exact:
+                ev['shadow'] = gate.run_exact(inc, lambda idx: cand[idx], self._evidence_lot_size)
+            else:
+                ev['shadow'] = None if warm else gate.run(
+                    inc, lambda idx: cand[idx], self._evidence_lot_size, record_all=True)
+            if key in self._eval_cache:
+                # Mede o determinismo do eval: mesmo prompt, mesma avaliação?
+                n_diff = int((self._eval_cache[key] != cand).sum())
+                trace(self.logger, 'duplicate_check', {
+                    'node_id': node_id,
+                    'duplicate_of_node_id': self._eval_cache_origin.get(key),
+                    'identical': n_diff == 0,
+                    'n_diff_items': n_diff,
+                })
+        self._cache_put(opt_prompt, cand, node_id)
         gate.update(inc, cand)
         return out, ev
+
+    def _trace_train_items(self, iter, node, train_forward_output, sampled_forward_output):
+        """
+        Evento 'train_items' (todos os modos): acerto de cada exemplo de treino da
+        iteração e se foi mostrado ao otimizador. Só instrumentação.
+        """
+        shown = {id(ex) for ex in sampled_forward_output['examples']}
+        items = [
+            {'key': hashlib.sha1(ex['question'].encode('utf-8')).hexdigest()[:12],
+             'correct': int(bool(c)),
+             'shown': id(ex) in shown}
+            for ex, c in zip(train_forward_output['examples'], train_forward_output['correct'])
+        ]
+        trace(self.logger, 'train_items', {
+            'iter': iter,
+            'node_id': node.id,
+            'incumbent_id': self.incumbent_ids[-1] if self.incumbent_ids else None,
+            'curriculum_mode': self.curriculum_mode,
+            'items': items,
+        })
 
     def _trace_eval(self, node, parent, kind, incumbent, forward_output, ev=None):
         """Eventos 'eval_cost' e 'eval_items' (acertos por item na ordem fixa do eval)."""
@@ -830,18 +954,38 @@ class GraceSearchWorldModel():
             'actual_accepted': bool(actual_accepted),
             'delta_full': ev['delta_full'],
             'n_items_total': self._n_eval,
+            'rule': self.evidence_rule,
         }
         if sim is None:
             payload['hypothetical'] = None   # aquecimento: sem decisão hipotética
         else:
+            exact = self.evidence_rule == 'exact'
+            if exact:
+                # Teorema da regra exata: a decisão simulada tem de coincidir com a
+                # avaliação completa sob a MESMA margem (Delta_full >= m). Com m=1 isso
+                # é igual à decisão strict real; com m>1 a strict real pode divergir
+                # legitimamente, por isso 'agrees' compara com Delta_full >= m.
+                agrees = sim['accepted'] == (ev['delta_full'] >= self.gate.margin)
+            else:
+                agrees = sim['accepted'] == bool(actual_accepted)
             payload.update({
                 'hypothetical': 'reject_early' if sim['rejected_early']
                                 else ('accept' if sim['accepted'] else 'reject_full'),
                 'hypothetical_accepted': sim['accepted'],
                 'n_items_used': sim['n_evaluated'],
-                'agrees': sim['accepted'] == bool(actual_accepted),
-                'steps': sim['steps'],   # por lote: n_items, delta parcial, P, ação
+                'agrees': agrees,
+                'steps': sim['steps'],   # por lote: n_items, delta parcial, (P | limites), ação
             })
+            if exact:
+                payload['agrees_with_actual'] = sim['accepted'] == bool(actual_accepted)
+                if not agrees:
+                    # Não deveria ocorrer: indicaria bug em run_exact ou nas entradas.
+                    trace(self.logger, 'exact_violation', {
+                        'node_id': node.id,
+                        'incumbent_id': incumbent.id,
+                        'delta_full': ev['delta_full'],
+                        'n_items_used': sim['n_evaluated'],
+                    })
         trace(self.logger, 'evidence_shadow', payload)
 
     def _trace_iteration(self, iter, node, train_acc, regression, reg_iter, stopped=None):

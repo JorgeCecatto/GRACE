@@ -78,16 +78,31 @@ class GraceSearch(SearchAlgo):
         world_model, 
         
         # log
-        logger=None, 
+        logger=None,
         log_dir = None,
+
+        # seleção final e teste; None = usa o valor do world model (vem do YAML,
+        # world_model_setting)
+        final_selection: Optional[str] = None,       # 'incumbent' | 'legacy_ties'
+        test_root: Optional[bool] = None,            # testa também o prompt raiz
+        test_all_incumbents: Optional[bool] = None,  # testa cada incumbente da cadeia
         **kwargs,
         ) -> None:
-        
+
         self.task = task
         self.world_model = world_model
         self.logger = logger
         self.log_dir = log_dir
-        
+
+        def pick(value, name, default):
+            return value if value is not None else getattr(world_model, name, default)
+
+        self.final_selection = pick(final_selection, 'final_selection', 'incumbent')
+        self.test_root = bool(pick(test_root, 'test_root', True))
+        self.test_all_incumbents = bool(pick(test_all_incumbents, 'test_all_incumbents', False))
+        assert self.final_selection in ('incumbent', 'legacy_ties'), \
+            f"final_selection inválido: {self.final_selection}"
+
         self.nodes:List[GraceNode] = [] 
         self.all_nodes:List[GraceNode] = []
         
@@ -146,30 +161,61 @@ class GraceSearch(SearchAlgo):
             metric = node.eval_metric
             return metric[-1] if isinstance(metric, tuple) else metric
 
-        scored_nodes = [(node, get_latest_eval_metric(node)) for node in self.all_nodes]
-        max_metric = max(score for _,score in scored_nodes)
-        best_nodes = [node for node, score in scored_nodes if score == max_metric]
+        by_id = {node.id: node for node in self.all_nodes}
+        incumbent_ids = [i for i in getattr(self.world_model, 'incumbent_ids', []) if i in by_id]
+        chain = [by_id[i] for i in incumbent_ids]
 
-        for node in best_nodes:
+        selection = self.final_selection
+        if selection == 'incumbent' and not chain:
+            self.logger.info("AVISO: cadeia de incumbentes vazia; usando final_selection='legacy_ties'.")
+            selection = 'legacy_ties'
+
+        selected_node_id = None
+        if selection == 'incumbent':
+            # Só nós que foram incumbentes têm eval exato garantido. Maior eval_metric;
+            # empate -> o primeiro da cadeia (max devolve o 1º máximo).
+            selected = max(chain, key=get_latest_eval_metric)
+            selected_node_id = selected.id
+            to_test = [selected]
+        else:
+            scored_nodes = [(node, get_latest_eval_metric(node)) for node in self.all_nodes]
+            max_metric = max(score for _,score in scored_nodes)
+            to_test = [node for node, score in scored_nodes if score == max_metric]
+
+        if self.test_root:
+            to_test.append(self.root)
+        if self.test_all_incumbents:
+            to_test.extend(chain)
+
+        tested = {}
+        for node in to_test:
+            if node.id in tested:
+                continue
             node.test_metric, _ = self.world_model.test_prompt(node.prompt, node_id=node.id)
+            tested[node.id] = node
 
         cost_dic = {"base_api_count":global_vars.base_api_count,"base_input_token":global_vars.base_input_token,"base_output_token":global_vars.base_output_token,
-                    "target_api_count":global_vars.target_api_count,"target_input_token":global_vars.target_input_token,"target_output_token":global_vars.target_output_token,}        
-        
+                    "target_api_count":global_vars.target_api_count,"target_input_token":global_vars.target_input_token,"target_output_token":global_vars.target_output_token,}
+
         return dict(
             all_nodes = self.all_nodes,
             cost = cost_dic,
+            final_selection = selection,
+            selected_node_id = selected_node_id,   # None em 'legacy_ties' (vários empatados testados)
+            tested_node_ids = list(tested),
+            root_test_metric = self.root.test_metric if self.test_root else None,
+            incumbent_ids = incumbent_ids,
         )
-    
+
 
     def output_to_json(self, output):
-        data_to_save = {}       
-        
+        data_to_save = {}
+
         for key in output:
-            if key == "cost":
-                data_to_save["cost"] = output['cost']
-            else:
+            if key == "all_nodes":
                 data_to_save[key] = [node.to_dict() for node in output[key]]
+            else:
+                data_to_save[key] = output[key]
         with open(os.path.join(self.log_dir, 'results.json'), 'w') as f:
             json.dump(data_to_save, f, indent=4)
 

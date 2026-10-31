@@ -211,6 +211,92 @@ class EvidenceGate:
             'rate_loss': rl,
         }
 
+    # ------------------------------------------------------ regra exata (sem MC)
+    def run_exact(
+        self,
+        inc_correct: Sequence[int],
+        fetch_lot: Callable[[List[int]], Sequence[int]],
+        lot_size: int,
+    ) -> Dict:
+        """
+        Avaliação sequencial EXATA: rejeita cedo só quando é matematicamente
+        impossível o candidato atingir a margem. Sem Monte Carlo e sem aquecimento.
+
+        Notação: J0 = itens que o incumbente erra, J1 = itens que acerta.
+        Delta_final = ganhos (itens de J0 que o candidato acerta)
+                      - perdas (itens de J1 que o candidato erra).
+        Após avaliar parte dos itens, com delta_obs o Delta parcial, R0 = itens de J0
+        ainda não avaliados e R1 = itens de J1 ainda não avaliados:
+
+            delta_obs - R1  <=  Delta_final  <=  delta_obs + R0.
+
+        Teorema (exatidão): se delta_obs + R0 < m, então Delta_final < m para
+        QUALQUER resultado dos itens restantes, pois cada item de J0 restante soma no
+        máximo +1 e cada item de J1 restante soma no máximo 0. Logo a rejeição precoce
+        nunca rejeita um candidato que a avaliação completa aceitaria (Delta_final >= m),
+        qualquer que seja a ordem de avaliação. A ordem (a aprendida por `order`, J0
+        primeiro) só afeta QUANTOS itens são poupados, não a decisão.
+
+        Procedimento: avalia em lotes de `lot_size` na ordem; após cada lote (exceto o
+        último), se delta_obs + R0 < m, rejeita. NÃO existe aceitação parcial: se não
+        rejeitar, avalia até o fim e aceita sse Delta >= m. Com m = 1 reproduz a regra
+        estrita do GRACE (acc_c > acc_i).
+
+        Devolve as mesmas chaves de `run()`. Diferenças de significado:
+        - `est_delta_total` é o LIMITE SUPERIOR delta_obs + R0 no momento da parada
+          (não uma estimativa); se não rejeitou, é o Delta exato.
+        - `rate_gain`/`rate_loss` vêm do posterior usado só para ordenar.
+        - cada step: {'n_items', 'delta', 'upper_bound', 'lower_bound', 'action'},
+          com action em {'continue', 'reject'}.
+        """
+        inc = np.asarray(inc_correct, dtype=int)
+        assert len(inc) == self.n, f"incumbente com {len(inc)} itens, esperado {self.n}"
+        lot_size = max(1, int(lot_size))
+        a, b, rg, rl = self.posterior(inc)
+        order = self.order(inc, a, b)
+
+        cand = np.full(self.n, -1, dtype=int)
+        delta = 0
+        pos = 0
+        early = False
+        steps = []
+        upper = 0
+
+        while pos < self.n:
+            lot = order[pos:pos + lot_size]
+            res = np.asarray(fetch_lot([int(j) for j in lot]), dtype=int)
+            assert len(res) == len(lot), "fetch_lot devolveu número de acertos diferente do pedido"
+            cand[lot] = res
+            delta += int(((res == 1) & (inc[lot] == 0)).sum() - ((res == 0) & (inc[lot] == 1)).sum())
+            pos += len(lot)
+            rest = order[pos:]
+            r0 = int((inc[rest] == 0).sum())
+            r1 = int((inc[rest] == 1).sum())
+            upper = delta + r0
+            if len(rest) == 0:
+                break
+            if upper < self.margin:
+                early = True
+            steps.append({
+                'n_items': int(pos), 'delta': int(delta),
+                'upper_bound': int(upper), 'lower_bound': int(delta - r1),
+                'action': 'reject' if early else 'continue',
+            })
+            if early:
+                break
+
+        return {
+            'accepted': bool((not early) and delta >= self.margin),
+            'rejected_early': bool(early),
+            'cand_correct': cand,
+            'n_evaluated': int((cand >= 0).sum()),
+            'delta': int(delta),
+            'steps': steps,
+            'est_delta_total': float(upper),  # LIMITE SUPERIOR de Delta_final (exato se completo)
+            'rate_gain': rg,
+            'rate_loss': rl,
+        }
+
     # ------------------------------------------------------------------ histórico
     def update(self, inc_correct: Sequence[int], cand_correct: Sequence[int]):
         """

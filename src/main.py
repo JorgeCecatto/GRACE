@@ -71,5 +71,7 @@ def main(args):
 if __name__ == '__main__':
     args = config()
     validate_config(args)
-    print(args)
+    # não imprime api_key
+    print({k: ({kk: vv for kk, vv in v.items() if kk != 'api_key'} if isinstance(v, dict) else v)
+           for k, v in args.items()})
     main(args)

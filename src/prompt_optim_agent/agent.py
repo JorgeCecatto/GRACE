@@ -118,6 +118,8 @@ class BaseAgent():
         for var_name in vars_dict:
             if var_name in ignored_print_vars: continue
             var_value = vars_dict[var_name]
+            if isinstance(var_value, dict):
+                var_value = {k: v for k, v in var_value.items() if k != 'api_key'}  # não loga a chave
             self.logger.info(f'{var_name} : {var_value}')
 
     

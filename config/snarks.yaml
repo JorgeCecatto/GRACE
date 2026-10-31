@@ -27,8 +27,8 @@ base_model_setting:
   provider_sort: price
   provider_ignore:  # provedores do OpenRouter a ignorar
   max_tokens: 20000 # price | throughput | latency# api-based model'name or huggingface model nam
-  temperature: 0.7
-  api_key: #api key do OpenRouter (ou OpenAI) para o modelo base. Se estiver vazio, o GRACE vai usar o modelo base do OpenAI (gpt-4 ou gpt-3.5-turbo) com a api_key do OpenAI.
+  temperature: 0.0
+  api_key: null # preencha localmente; não commitar
   base_model: true
 
 optim_model_setting:
@@ -39,8 +39,8 @@ optim_model_setting:
   max_tokens: 20000 # price | throughput | latency# api-based model'name or huggingface model nam
   provider_sort: price # price | throughput | latency# api-based model'name or huggingface model nam
   provider_ignore:  # provedores do OpenRouter a ignorar
-  api_key: #api key do OpenRouter (ou OpenAI) para o modelo otimizado. Se estiver vazio, o GRACE vai usar o modelo otimizado do OpenAI (gpt-4 ou gpt-3.5-turbo) com a api_key do OpenAI.  
-  temperature: 0.9
+  api_key: null # preencha localmente; não commitar
+  temperature: 0.6
   base_model: false
 
 
@@ -54,14 +54,14 @@ world_model_setting:
   eval_temperature: 0.0 # temperatura nas chamadas de pontuacao (eval/test); 0.0 = deterministico
 
   # --- curriculum (os padrões abaixo preservam o comportamento atual) ---
-  curriculum_mode: static        # static (atual) | bayes | off (GRACE original)
+  curriculum_mode: "off"         # COM aspas (sem aspas o YAML lê False). static | bayes | off (GRACE original)
   # As chaves abaixo só têm efeito com curriculum_mode: bayes
   centroid_mode: global          # global | class (grupo = classe do rótulo)
   intrinsic_mode: centroid       # centroid | hdbscan (requer scikit-learn >= 1.3)
   curriculum_window: 10          # W: janela deslizante de observações por exemplo
   curriculum_prior_strength: 2.0 # kappa: peso do prior em pseudo-observações
   curriculum_refit_every: 5      # R: reajuste empirical Bayes de (w0, w1) a cada R lotes
-  curriculum_seed: 0             # seed do sorteio do lote de atualização
+  curriculum_seed: 0             # seed do sorteio do currículo/lote de atualização; usar 1 na segunda repetição
   hdbscan_min_cluster_size: 5
   hdbscan_min_samples: 3
   typical_percentile: 50.0       # percentil (0-100) que define exemplos típicos
@@ -75,14 +75,21 @@ world_model_setting:
   # Os valores abaixo são os padrões: preservam o comportamento atual.
   acceptance_mode: evidence_shadow # strict (atual) | evidence_shadow (decide como hoje, só registra
                                  # a decisão hipotética) | evidence (regra sequencial de verdade)
+  evidence_rule: exact           # exact (limite exato, sem MC/warmup) | statistical (MC + warmup)
   evidence_margin: 1             # m: aceita sse Delta >= m (m=1 equivale a acc > max_acc)
+  # As 4 chaves abaixo só têm efeito com evidence_rule: statistical (kappa/seed também ordenam na exact)
   evidence_delta: 0.05           # rejeita cedo se P(Delta_total >= m) <= delta; completa se >= 1-delta
   evidence_kappa: 5.0            # força do prior empírico agrupado das taxas de ganho/perda
   evidence_warmup: 10            # candidatos OPT avaliados por inteiro antes de usar o histórico
   evidence_mc_samples: 2000      # amostras Monte Carlo para P(Delta_total >= m)
-  evidence_batch_size: null      # tamanho do lote sequencial; null = eval_batch_size (200), o que
-                                 # com eval_size=45 dá UM lote só (sem rejeição precoce). Ex.: 8
+  evidence_batch_size: 8         # itens do eval por lote sequencial; null = eval_batch_size (200) = um lote só
   evidence_seed: 0               # seed do Monte Carlo
+  reuse_duplicates: true         # reaproveita o vetor do eval de prompts idênticos (modo evidence)
+
+  # --- seleção final e teste ---
+  final_selection: incumbent     # incumbent (só a cadeia de incumbentes) | legacy_ties (todos os empatados)
+  test_root: true                # testa também o prompt raiz (root_test_metric)
+  test_all_incumbents: false     # true = testa cada incumbente da cadeia
 
   # --- ordenação do treino por Thompson (só tem efeito com curriculum_mode: bayes) ---
   train_order: default           # default (atual) | thompson
